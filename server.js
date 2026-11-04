@@ -31,6 +31,26 @@ const CFG = {
 // ---------------- 会话 ----------------
 const sessions = new Map(); // sid -> session
 
+// ---------------- 轻量限流（Caddy 反代，取 X-Forwarded-For 首个 IP） ----------------
+const rateBuckets = new Map();
+let prepBusy = 0;
+function clientIp(req) {
+  const xff = String((req && req.headers && req.headers['x-forwarded-for']) || '').split(',')[0].trim();
+  return xff || (req && req.socket && req.socket.remoteAddress) || 'unknown';
+}
+function allow(key, limit, windowMs) {
+  const now = Date.now();
+  const rec = rateBuckets.get(key);
+  if (!rec || now - rec.ts > windowMs) { rateBuckets.set(key, { n: 1, ts: now }); return true; }
+  rec.n += 1;
+  return rec.n <= limit;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of rateBuckets) if (now - v.ts > 3600000) rateBuckets.delete(k);
+  for (const [sid, s] of sessions) if (!s.ws && now - s.createdAt > 3 * 3600000) sessions.delete(sid);
+}, 10 * 60 * 1000).unref();
+
 function newSession(payload) {
   const sid = crypto.randomBytes(4).toString('hex');
   const s = {
@@ -479,6 +499,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === 'POST' && req.url === '/api/prepare') {
+    const ip = clientIp(req);
+    if (!allow('prep:' + ip, 10, 10 * 60 * 1000)) {
+      res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: '准备请求太频繁，请 10 分钟后再试' }));
+      return;
+    }
+    if (prepBusy >= 2) {
+      res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: '服务器正在处理另一场准备，稍等半分钟再试' }));
+      return;
+    }
+    prepBusy += 1;
+    res.on('close', () => { prepBusy = Math.max(0, prepBusy - 1); });
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 15 * 1024 * 1024) req.destroy(); });
     req.on('end', async () => {
@@ -620,7 +653,8 @@ async function finishInterview(session, reason) {
   }
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  if (!allow('ws:' + clientIp(req), 60, 60 * 1000)) { try { ws.close(1013, 'too many'); } catch {} return; }
   let session = null;
   ws.on('message', async (data, isBinary) => {
     try {
