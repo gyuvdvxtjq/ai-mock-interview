@@ -125,7 +125,9 @@ async function llmComplete(messages, opts = {}) {
   });
   if (!res.ok) throw new Error('LLM ' + res.status + ' ' + (await res.text()).slice(0, 200));
   const j = await res.json();
-  return j.choices?.[0]?.message?.content || '';
+  const content = j.choices?.[0]?.message?.content || '';
+  if (!content) console.log('[llm] 空返回 finish=' + j.choices?.[0]?.finish_reason + ' usage=' + JSON.stringify(j.usage || {}).slice(0, 160));
+  return content;
 }
 
 // ---------------- TTS：Google Translate TTS（免费无密钥；失败时前端 speechSynthesis 兜底） ----------------
@@ -217,8 +219,8 @@ function buildDossier(session, repoText) {
 deepDive 给 6-8 个问题，按含金量排序。要引用具体文件名/模块名，让问题有真实感。
 
 仓库代码：
-${repoText}`;
-  return llmComplete([{ role: 'user', content: prompt }], { maxTokens: 2500, temperature: 0.3 });
+  ${repoText.slice(0, 220000)}`;
+  return llmComplete([{ role: 'user', content: prompt }], { maxTokens: 8000, temperature: 0.3 });
 }
 
 function extractJson(text) {
@@ -521,8 +523,15 @@ const server = http.createServer(async (req, res) => {
           try {
             const repoText = collectRepoText(tmp);
             if (!repoText) throw new Error('仓库里没找到可读的代码文件');
-            const raw = await buildDossier(session, repoText);
-            session.dossier = extractJson(raw);
+            try {
+              const raw = await buildDossier(session, repoText);
+              session.dossier = extractJson(raw);
+              console.log('[dossier] ok repo=' + repoText.length + ' chars');
+            } catch (e) {
+              // 模型不支持长上下文/输出被截断时，不要卡死整个准备流程
+              console.log('[dossier] 分析失败，跳过项目档案：' + e.message.slice(0, 120));
+              session.dossier = null;
+            }
           } finally {
             fs.rmSync(tmp, { recursive: true, force: true });
           }
