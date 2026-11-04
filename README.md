@@ -13,6 +13,7 @@
 
 - 主机：`ssh tokyo`（Amazon Linux 2023，2C / 916MB），代码在 `~/interview`，systemd `interview.service`（`/usr/bin/node-22 server.js`，环境变量读 `~/interview/.env`）
 - 入口：Caddy 反代 `https://54-199-55-96.sslip.io`（Let's Encrypt 自动证书；Caddy 原本就在跑 80/443）。换自有域名 = 加一条 A 记录 + 在 `/etc/caddy/Caddyfile` 加站点块后 `systemctl reload caddy`
+- 依赖：Node 22 + git（GitHub 仓库深挖必需）+ ffmpeg（仅 e2e 测试用）
 - 运维：日志 `~/interview/server.log`，重启 `sudo systemctl restart interview`
 - 注意：内存 916MB，只跑 Live 引擎（Node 实占约 25MB）；cascade 的 whisper 容器放不下，兜底需外挂
 - 旧盒子（instabox，美东）保留作对照

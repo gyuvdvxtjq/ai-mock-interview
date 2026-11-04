@@ -498,7 +498,8 @@ const server = http.createServer(async (req, res) => {
               env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, timeout: 90000,
             }, (err, so, se) => {
               if (!err) return resolve();
-              const msg = String(se);
+              if (err.code === 'ENOENT') return reject(new Error('服务器未安装 git，无法克隆仓库'));
+              const msg = String(se) || String(err.message || '未知错误');
               if (/could not read Username|Authentication failed|not found/i.test(msg)) {
                 reject(new Error('仓库不存在或不是公开仓库（私有仓库需要先公开，或配置 GitHub Token）'));
               } else {
