@@ -265,14 +265,22 @@ function liveUrl() {
   return `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${CFG.geminiKey}`;
 }
 
-function flushUserTurn(session) {
+function flushUserTurn(session, late) {
   const t = (session.live.inText || '').trim();
+  if (!t) return; // 没内容就什么都不做，避免把"已发过"的标记提前置位
   session.live.inText = '';
   session.live.userFlushed = true;
-  if (t) {
-    session.transcript.push({ role: 'user', text: t, t: Date.now() });
-    session.ws?.send(JSON.stringify({ type: 'add_transcript', role: 'user', text: t }));
+  const entry = { role: 'user', text: t, t: Date.now() };
+  if (late) {
+    // 转写比 AI 回复晚到：在转写记录里插到最后一条 AI 之前，保证问答顺序正确
+    let i = session.transcript.length - 1;
+    while (i >= 0 && session.transcript[i].role !== 'ai') i--;
+    if (i >= 0) session.transcript.splice(i, 0, entry); else session.transcript.push(entry);
+  } else {
+    session.transcript.push(entry);
   }
+  session.ws?.send(JSON.stringify({ type: 'add_transcript', role: 'user', text: t, insertBeforeAi: !!late }));
+  console.log('[live] 用户转写 ' + t.length + ' 字' + (late ? '（迟到）' : '') + ' sid=' + session.sid);
 }
 
 function liveSendText(session, text) {
@@ -338,20 +346,23 @@ function startLive(session) {
       session.ws?.send(JSON.stringify({ type: 'interrupted' }));
     }
     if (sc.inputTranscription?.text) session.live.inText += sc.inputTranscription.text;
-    if (sc.outputTranscription?.text) {
-      session.live.outText += sc.outputTranscription.text;
-      session.live.aiOpen = true;
-      session.ws?.send(JSON.stringify({ type: 'ai_delta', text: sc.outputTranscription.text }));
-    }
+    // 模型开口 = 这一轮用户说完了：先把用户转写发出去，保证气泡顺序在 AI 回复之前
     if (sc.modelTurn?.parts) {
-      if (!session.live.userFlushed && session.live.inText.trim()) flushUserTurn(session);
+      flushUserTurn(session);
       for (const p of sc.modelTurn.parts) {
         const d = p.inlineData?.data;
         if (d) session.ws?.send(JSON.stringify({ type: 'live_audio', audio: d }));
       }
     }
+    if (sc.outputTranscription?.text) {
+      session.live.outText += sc.outputTranscription.text;
+      session.live.aiOpen = true;
+      session.ws?.send(JSON.stringify({ type: 'ai_delta', text: sc.outputTranscription.text }));
+    }
     if (sc.turnComplete) {
-      if (!session.live.userFlushed && session.live.inText.trim()) flushUserTurn(session);
+      flushUserTurn(session);
+      // 转写偶尔比 turnComplete 晚到，兜一次底
+      setTimeout(() => { if (session.live && !session.live.closed) flushUserTurn(session, true); }, 700);
       session.live.userFlushed = false;
       const ai = session.live.outText.trim();
       session.live.outText = '';

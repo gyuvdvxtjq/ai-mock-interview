@@ -674,7 +674,7 @@ function connectWS() {
         if (engine === 'live') { setState('实时连线 · 请讲', 'listening'); toast('⚡ Gemini Live 实时引擎已接入'); }
         else { toast('Live 引擎不可用，已切换级联模式'); setState('听你说', 'listening'); }
         break;
-      case 'add_transcript': addMsg(m.role, m.text); break;
+      case 'add_transcript': addMsg(m.role, m.text, m.insertBeforeAi); break;
       case 'sentence': onSentence(m); break;
       case 'reply_end': pendingAI = null; break;
       case 'live_audio': playLiveChunk(m.audio); break;
@@ -735,7 +735,7 @@ async function loadSessionInfo() {
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 /* ================= 转写 / 状态 ================= */
-function addMsg(role, text) {
+function addMsg(role, text, insertBeforeAi) {
   const t = $('transcript');
   const div = document.createElement('div');
   if (role === 'sys') { div.className = 'msg sys'; div.textContent = text; }
@@ -747,7 +747,9 @@ function addMsg(role, text) {
     div.appendChild(who); div.appendChild(body);
     div._body = text || '';
   }
-  t.appendChild(div); autoScroll();
+  if (insertBeforeAi && lastAIBubble && lastAIBubble.parentNode === t) t.insertBefore(div, lastAIBubble);
+  else t.appendChild(div);
+  autoScroll();
   if (role === 'ai' && text) lastAIBubble = div; // 开场白经 add_transcript 建泡，登记以便 sentence 去重
   if (role !== 'sys') { messages.push({ role, text }); msgCount = messages.length; $('trCount').textContent = msgCount ? msgCount + ' 条' : ''; }
   return div;
