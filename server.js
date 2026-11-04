@@ -25,6 +25,7 @@ const CFG = {
   geminiModel: process.env.GEMINI_MODEL || 'gemini-3.8-live',
   geminiVoice: process.env.GEMINI_VOICE || 'Charon', // Live 引擎男声
   maxUtteranceBytes: 16000 * 2 * 35, // 35 秒上限
+  interviewMinutes: Number(process.env.INTERVIEW_MINUTES || 15), // 单场面试上限（分钟）
 };
 
 // ---------------- 会话 ----------------
@@ -151,7 +152,7 @@ function enqueueSentence(session, text) {
       const audio = await ttsSpeak(session, text);
       if ((session.replySeq || 0) !== seq) return;
       session.ws?.send(JSON.stringify({ type: 'sentence', text, audio: audio.toString('base64') }));
-    } catch (e) {
+  } catch (e) {
       console.error('[tts]', e.message);
       if ((session.replySeq || 0) === seq) {
         session.ws?.send(JSON.stringify({ type: 'sentence', text })); // 无音频 -> 前端走本地合成兜底
@@ -517,13 +518,13 @@ const server = http.createServer(async (req, res) => {
         session.systemPrompt = buildSystemPrompt(session);
         // 开场白
         session.greeting = (await llmComplete([
-          { role: 'system', content: session.systemPrompt },
-          { role: 'user', content: '（候选人刚刚上线坐好，请开始面试：一句简短的打招呼 + 请对方先做个自我介绍。直接输出要说的话。）' },
-        ], { maxTokens: 150, temperature: 0.8 })).trim();
+        { role: 'system', content: session.systemPrompt },
+        { role: 'user', content: '（候选人刚刚上线坐好，请开始面试：一句简短的打招呼 + 请对方先做个自我介绍。直接输出要说的话。）' },
+      ], { maxTokens: 150, temperature: 0.8 })).trim();
         const summary = session.dossier ? `项目分析完成：${session.dossier.projectSummary || ''}` : (session.resumeText ? '简历解析完成' : '');
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ sid: session.sid, summary }));
-      } catch (e) {
+    } catch (e) {
         console.error('[prepare]', e);
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ error: e.message.slice(0, 300) }));
@@ -550,6 +551,53 @@ const server = http.createServer(async (req, res) => {
 
 // ---------------- WebSocket ----------------
 const wss = new WebSocketServer({ server, path: '/ws' });
+
+async function generateReport(session) {
+  if (session.reporting) return;
+  session.reporting = true;
+  const ws = session.ws;
+  const send = (o) => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); } catch {} };
+  try {
+    send({ type: 'status', text: '生成复盘报告…' });
+    const transcriptText = session.transcript
+      .map((t) => (t.role === 'ai' ? '面试官：' : '候选人：') + t.text).join('\n');
+    const md = await llmComplete([
+      { role: 'system', content: '你是面试复盘助手。严格按以下格式输出：第一行只写 `总分：X/100`；第二行只写 `技术深度：X/100，表达清晰：X/100，抗追问：X/100，项目真实感：X/100`；空一行后输出 markdown 复盘报告正文：# 模拟面试复盘报告，包含 总体评价(一段话)、亮点(列表)、暴露的问题(列表，具体到哪句话暴露了什么)、逐题点评(按问答顺序，每条一行：**问：**问题原文 → **答：**候选人回答要点 → **评分：**X/10 → **更好的答法：**一句可直接套用的示范)、改进建议(列表，给出可以直接用的更好答法示例)、面试官追问点回顾(列表)。全部用中文，直接给候选人看，客观但直接。' },
+      { role: 'user', content: transcriptText.slice(0, 20000) },
+    ], { maxTokens: 2500, temperature: 0.4 });
+    send({ type: 'report', markdown: md, html: marked.parse(md) });
+  } catch (e) {
+    send({ type: 'error', text: '报告生成失败：' + e.message.slice(0, 120) });
+    send({ type: 'report_failed' });
+  } finally {
+    session.reporting = false;
+  }
+}
+
+async function finishInterview(session, reason) {
+  if (!session || session.interviewDone) return;
+  session.interviewDone = true;
+  clearTimeout(session.maxTimer);
+  const ws = session.ws;
+  const send = (o) => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); } catch {} };
+  if (reason === 'timeup') send({ type: 'timeup' });
+
+  const genReport = () => generateReport(session);
+
+  const farewell = reason === 'timeup'
+    ? '（时间到了，面试必须结束。请用一两句话礼貌收尾，不要提问。）'
+    : '（候选人申请结束面试。请用一两句话礼貌收尾道别，不要再提问。）';
+  if (session.engine === 'live' && session.live?.ws && session.live.ready) {
+    session.live.closed = true;
+    liveSendText(session, farewell);
+    setTimeout(async () => {
+      try { session.live.ws?.close(); } catch {}
+      await genReport();
+    }, 6000);
+  } else {
+    await genReport();
+  }
+}
 
 wss.on('connection', (ws) => {
   let session = null;
@@ -579,7 +627,8 @@ wss.on('connection', (ws) => {
         if (!session) { ws.send(JSON.stringify({ type: 'error', text: '会话不存在，请重新准备' })); return; }
         session.ws = ws;
         session.engine = CFG.geminiKey ? 'live' : 'cascade';
-        ws.send(JSON.stringify({ type: 'ready', position: session.position, mode: session.mode, engine: session.engine }));
+        if (!session.maxTimer) session.maxTimer = setTimeout(() => finishInterview(session, 'timeup'), CFG.interviewMinutes * 60 * 1000);
+        ws.send(JSON.stringify({ type: 'ready', position: session.position, mode: session.mode, engine: session.engine, minutes: CFG.interviewMinutes }));
         if (session.engine === 'live') {
           startLive(session); // setupComplete 后由它推 engine/live 消息并开场
         } else {
@@ -619,39 +668,17 @@ wss.on('connection', (ws) => {
           else await replyFromText(session, t, 'text');
           break;
         }
-        case 'end_interview': {
-          session.interviewDone = true;
-          const genReport = async () => {
-            ws.send(JSON.stringify({ type: 'status', text: '生成绩复盘报告…' }));
-            try {
-              const transcriptText = session.transcript
-                .map((t) => (t.role === 'ai' ? '面试官：' : '候选人：') + t.text).join('\n');
-              const md = await llmComplete([
-                { role: 'system', content: '你是面试复盘助手。严格按以下格式输出：第一行只写 `总分：X/100`；第二行只写 `技术深度：X/100，表达清晰：X/100，抗追问：X/100，项目真实感：X/100`；空一行后输出 markdown 复盘报告正文：# 模拟面试复盘报告，包含 总体评价(一段话)、亮点(列表)、暴露的问题(列表，具体到哪句话暴露了什么)、改进建议(列表，给出可以直接用的更好答法示例)、面试官追问点回顾(列表)。全部用中文，直接给候选人看，客观但直接。' },
-                { role: 'user', content: transcriptText.slice(0, 20000) },
-              ], { maxTokens: 2500, temperature: 0.4 });
-              ws.send(JSON.stringify({ type: 'report', markdown: md, html: marked.parse(md) }));
-            } catch (e) {
-              ws.send(JSON.stringify({ type: 'error', text: '报告生成失败：' + e.message.slice(0, 120) }));
-            }
-          };
-          if (session.engine === 'live' && session.live?.ws && session.live.ready) {
-            session.live.closed = true; // 收尾后不再重连
-            liveSendText(session, '（候选人申请结束面试。请用一两句话礼貌收尾道别，不要再提问。）');
-            setTimeout(async () => {
-              try { session.live.ws?.close(); } catch {}
-              await genReport();
-            }, 6000);
-          } else {
-            await genReport();
-          }
+        case 'end_interview':
+          await finishInterview(session, 'manual');
           break;
-        }
+        case 'gen_report':
+          await generateReport(session);
+          break;
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong' }));
           break;
       }
-    } catch (e) {
+  } catch (e) {
       console.error('[ws]', e.message);
     }
   });
