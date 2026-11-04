@@ -228,19 +228,15 @@ function parseRepoUrl(input) {
   return null;
 }
 
-function buildDossier(session, repoText) {
-  const prompt = `你是技术面试官的助手。下面是一位候选人的 GitHub 仓库的真实代码。请通读后输出**只含 JSON**（不要 markdown 代码块以外内容）的分析档案：
-{
-  "projectSummary": "这个仓库是做什么的、整体架构、用到的技术栈（150字内）",
-  "highlights": ["代码里真实存在的技术亮点/难点，3-5条"],
-  "deepDive": [{"q": "值得当面深挖的问题", "why": "为什么问（对应哪个文件/设计）", "expected": "真做过的人应该能答出的要点"}],
-  "traps": ["如果候选人没真做过，容易露馅的追问点，3-5条"]
+function dossierPrompt(repoText) {
+  return "你是技术面试官的助手。下面是一位候选人的 GitHub 仓库的真实代码。请通读后输出**只含 JSON**（不要 markdown 代码块以外内容）的分析档案：\n{\n  \"projectSummary\": \"这个仓库是做什么的、整体架构、用到的技术栈（150字内）\",\n  \"highlights\": [\"代码里真实存在的技术亮点/难点，3-5条\"],\n  \"deepDive\": [{\"q\": \"值得当面深挖的问题\", \"why\": \"为什么问（对应哪个文件/设计）\", \"expected\": \"真做过的人应该能答出的要点\"}],\n  \"traps\": [\"如果候选人没真做过，容易露馅的追问点，3-5条\"]\n}\ndeepDive 给 6-8 个问题，按含金量排序。要引用具体文件名/模块名，让问题有真实感。仓库代码：\n" + repoText;
 }
-deepDive 给 6-8 个问题，按含金量排序。要引用具体文件名/模块名，让问题有真实感。
-
-仓库代码：
-  ${repoText.slice(0, 220000)}`;
-  return llmComplete([{ role: 'user', content: prompt }], { maxTokens: 8000, temperature: 0.3 });
+async function buildDossier(session, repoText) {
+  const ask = (text) => llmComplete([{ role: 'user', content: dossierPrompt(text) }], { maxTokens: 8000, temperature: 0.3 });
+  const full = await ask(repoText.slice(0, 80000));
+  if (String(full || '').trim()) return full;
+  console.log('[dossier] 空返回，降到 60k 字符重试');
+  return ask(repoText.slice(0, 40000));
 }
 
 function extractJson(text) {
@@ -278,6 +274,54 @@ ${modeDesc}
 露馅点：${JSON.stringify(d.traps || [])}`;
   }
   return p;
+}
+
+function pickRelevantCode(repoText, question, maxChars) {
+  maxChars = maxChars || 60000;
+  const chunks = String(repoText || '').split(/(?=### 文件: )/).filter((x) => x.trim());
+  if (!chunks.length) return String(repoText || '').slice(0, maxChars);
+  const terms = new Set();
+  const q = String(question || '').toLowerCase();
+  (q.match(/[a-z_][a-z0-9_.\/-]{2,}/g) || []).forEach((w) => terms.add(w));
+  (q.match(/[\u4e00-\u9fa5]{2,}/g) || []).forEach((seg) => { for (let i = 0; i + 2 <= seg.length; i++) terms.add(seg.slice(i, i + 2)); });
+  const scored = chunks.map((c) => {
+    const low = c.toLowerCase();
+    let score = 0;
+    terms.forEach((t) => { if (low.includes(t)) score += 3; });
+    return { c, score };
+  });
+  const index = chunks.map((c) => (c.match(/^### 文件: (.+)/) || [])[1]).filter(Boolean).join('\n');
+  const head = '【仓库文件清单】\n' + index + '\n\n【与问题最相关的代码片段】\n';
+  const ordered = scored.slice().sort((a, b) => b.score - a.score);
+  const picked = [];
+  let total = head.length;
+  for (const it of ordered) {
+    if (it.score <= 0 && picked.length) continue;
+    if (total + it.c.length > maxChars) continue;
+    picked.push(it.c); total += it.c.length;
+  }
+  for (const it of ordered) {
+    if (picked.includes(it.c)) continue;
+    if (total + it.c.length > maxChars) break;
+    picked.push(it.c); total += it.c.length;
+  }
+  return head + picked.join('\n\n');
+}
+
+// ---------------- 面试后答疑（技术导师） ----------------
+function tutorPrompt(session, question) {
+  const parts = ['你是一位资深技术导师，正在帮候选人复盘刚结束的这场模拟面试。要求：结合下面提供的真实资料回答，优先引用仓库里真实存在的文件、函数、设计；资料里没有的内容要明确说"仓库里没有这部分"，绝不编造。回答具体、可操作，可以用 markdown（小标题、列表、代码块），不要客套话，不要重复问题。'];
+  parts.push('候选人目标岗位：' + (session.position || '未填写'));
+  if (session.jd) parts.push('【岗位 JD】\n' + session.jd);
+  if (session.repoText) parts.push('【仓库代码（按问题筛出的相关片段）】\n' + pickRelevantCode(session.repoText, question, 60000));
+  else if (session.resumeText) parts.push('【简历】\n' + session.resumeText.slice(0, 8000));
+  if (session.dossier) {
+    const d = session.dossier;
+    parts.push('【项目档案】\n' + JSON.stringify({ summary: d.projectSummary, highlights: d.highlights, deepDive: d.deepDive, traps: d.traps }).slice(0, 6000));
+  }
+  const tr = (session.transcript || []).slice(-24).map((t) => (t.role === 'ai' ? '面试官：' : '候选人：') + t.text).join('\n');
+  if (tr) parts.push('【刚才的面试记录（节选）】\n' + tr);
+  return parts.join('\n\n');
 }
 
 // ---------------- Gemini Live 实时引擎（端到端语音，sub-second） ----------------
@@ -556,6 +600,7 @@ const server = http.createServer(async (req, res) => {
           try {
             const repoText = collectRepoText(tmp);
             if (!repoText) throw new Error('仓库里没找到可读的代码文件');
+            session.repoText = repoText.slice(0, 80000); // 面试后答疑用
             try {
               const raw = await buildDossier(session, repoText);
               session.dossier = extractJson(raw);
@@ -582,6 +627,35 @@ const server = http.createServer(async (req, res) => {
         console.error('[prepare]', e);
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ error: e.message.slice(0, 300) }));
+      }
+    });
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/api/ask') {
+    const ip = clientIp(req);
+    if (!allow('ask:' + ip, 30, 60 * 60 * 1000)) {
+      res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: '提问太频繁了，歇一会儿再问' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 64 * 1024) req.destroy(); });
+    req.on('end', async () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        const s = sessions.get(String(payload.sid || ''));
+        const q = String(payload.question || '').trim().slice(0, 800);
+        if (!s) { res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: '会话已过期，重新准备一场就能再问' })); return; }
+        if (!q) { res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: '问题不能为空' })); return; }
+        const answer = await llmComplete([
+          { role: 'system', content: tutorPrompt(s, q) },
+          { role: 'user', content: q },
+        ], { maxTokens: 2500, temperature: 0.3 });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ answer }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: '回答失败：' + String(e.message).slice(0, 160) }));
       }
     });
     return;

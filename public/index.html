@@ -179,6 +179,23 @@
   #repRetry{display:none;margin-top:6px}
   #ringTag{font-size:11px;color:var(--dim);margin-top:4px}
 
+  /* ---------- 面试后答疑 ---------- */
+  #askCard .sub{font-size:12.5px}
+  .askBox{display:flex;gap:10px;align-items:flex-end;margin-top:14px}
+  .askBox textarea{flex:1;min-height:54px;resize:vertical}
+  .askBox button{flex:none;padding:12px 22px}
+  .askItem{border-top:1px dashed var(--line);padding:14px 0}
+  .askItem:first-child{border-top:none;padding-top:2px}
+  .askQ{font-weight:700;font-size:13.5px;margin-bottom:8px;display:flex;gap:8px;align-items:flex-start;line-height:1.7}
+  .askQ::before{content:"你";color:var(--acc);background:var(--accSoft);font-size:11px;border-radius:6px;padding:1px 6px;flex:none;line-height:16px;margin-top:2px}
+  .askA{font-size:13.5px;line-height:1.85}
+  .askA h1,.askA h2,.askA h3{font-size:14px;margin:12px 0 6px;color:var(--acc)}
+  .askA ul,.askA ol{padding-left:20px;margin:6px 0}
+  .askA li{margin:4px 0}
+  .askA pre{background:#f6f6fb;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;font-size:12.5px;margin:8px 0}
+  .askA code{font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+  .askA p{margin:7px 0}
+
   /* ---------- 训练记录 ---------- */
   #history{display:none;margin-top:16px}
   #history.on{display:block}
@@ -238,6 +255,8 @@
     .dims{width:100%;min-width:0}
     .repCard{padding:20px}
     .histBar{width:64px}
+    .askBox{flex-direction:column;align-items:stretch}
+    .askBox button{width:100%}
     #view-report.active{padding:18px 10px 40px}
     #setPop{position:fixed;left:12px;right:12px;top:auto;bottom:12px;width:auto}
   }
@@ -401,6 +420,16 @@
         <button class="ghost" id="trBtn">展开完整转写</button>
       </div>
       <div class="repCard trRev hidden" id="trRev" style="box-shadow:none;background:#fafafd"></div>
+    </div>
+    <div class="repCard" id="askCard" style="display:none">
+      <h1 style="font-size:17px;margin-bottom:6px">💬 继续问这个项目</h1>
+      <div class="sub">面试官下班了，导师还在。回答基于这个仓库的真实代码，不会的会直说。</div>
+      <div id="askList"></div>
+      <div class="askBox">
+        <textarea id="askInput" rows="2" placeholder="例如：这个状态机为什么这么设计？"></textarea>
+        <button class="primary" id="askBtn">提问</button>
+      </div>
+      <div id="askHint" style="font-size:11.5px;color:var(--dim);margin-top:8px">Ctrl/⌘ + Enter 发送</div>
     </div>
   </div>
 </div>
@@ -1020,6 +1049,7 @@ function showReport(m) {
   // 解锁弹药
   const lock = $('ammoLock'); if (lock) lock.style.display = 'none';
   const ab = $('ammoBody'); if (ab) ab.classList.remove('locked');
+  $('askCard').style.display = '';
   show('view-report');
   window.scrollTo(0, 0);
 }
@@ -1031,6 +1061,47 @@ $('dlBtn').onclick = () => {
   a.download = 'mock-interview-report.md'; a.click();
 };
 $('cpBtn').onclick = () => { navigator.clipboard.writeText(reportMd); toast('已复制到剪贴板'); };
+
+/* ================= 面试后答疑 ================= */
+let askBusy = false;
+function askItem(kind, text) {
+  const div = document.createElement('div');
+  div.className = 'askItem';
+  const d = document.createElement('div');
+  d.className = kind === 'q' ? 'askQ' : 'askA';
+  if (kind === 'q') d.textContent = text;
+  div.appendChild(d);
+  $('askList').appendChild(div);
+  return d;
+}
+async function askQuestion() {
+  const q = $('askInput').value.trim();
+  if (!q) return;
+  if (askBusy) { toast('上一个问题还在答，稍等'); return; }
+  if (!sid) return;
+  askBusy = true;
+  $('askBtn').disabled = true;
+  $('askInput').value = '';
+  askItem('q', q);
+  const bubble = askItem('a', '导师正在翻代码…');
+  bubble.style.color = 'var(--dim)';
+  try {
+    const res = await fetch('/api/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sid, question: q }) });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || '请求失败');
+    bubble.style.color = '';
+    bubble.innerHTML = mdParse(j.answer || '（没有返回内容）');
+  } catch (e) {
+    bubble.style.color = 'var(--err)';
+    bubble.textContent = '❌ ' + e.message;
+  } finally {
+    askBusy = false;
+    $('askBtn').disabled = false;
+    bubble.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+$('askBtn').onclick = askQuestion;
+$('askInput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); askQuestion(); } });
 
 /* ================= markdown（CDN 优先，轻量兜底） ================= */
 function mdParse(md) {
