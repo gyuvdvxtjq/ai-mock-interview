@@ -59,6 +59,7 @@ function newSession(payload) {
     position: (payload.position || '后端开发工程师').slice(0, 60),
     jd: (payload.jd || '').slice(0, 4000),
     mode: payload.mode === 'comprehensive' ? 'comprehensive' : 'project',
+    style: payload.style === 'code' ? 'code' : 'real',
     resumeText: payload.resumeText || '',
     githubUrl: payload.githubUrl || '',
     dossier: payload.dossier || null,
@@ -228,15 +229,21 @@ function parseRepoUrl(input) {
   return null;
 }
 
-function dossierPrompt(repoText) {
-  return "你是技术面试官的助手。下面是一位候选人的 GitHub 仓库的真实代码。请通读后输出**只含 JSON**（不要 markdown 代码块以外内容）的分析档案：\n{\n  \"projectSummary\": \"这个仓库是做什么的、整体架构、用到的技术栈（150字内）\",\n  \"highlights\": [\"代码里真实存在的技术亮点/难点，3-5条\"],\n  \"deepDive\": [{\"q\": \"值得当面深挖的问题\", \"why\": \"为什么问（对应哪个文件/设计）\", \"expected\": \"真做过的人应该能答出的要点\"}],\n  \"traps\": [\"如果候选人没真做过，容易露馅的追问点，3-5条\"]\n}\ndeepDive 给 6-8 个问题，按含金量排序。要引用具体文件名/模块名，让问题有真实感。仓库代码：\n" + repoText;
+function dossierPrompt(repoText, codeMode) {
+  if (codeMode) {
+    return '你是技术面试官的助手。下面是一位候选人的 GitHub 仓库的真实代码。请通读后输出**只含 JSON**（不要 markdown 代码块以外内容）的分析档案：\n{\n  "projectSummary": "这个仓库是做什么的、整体架构、用到的技术栈（150字内）",\n  "highlights": ["代码里真实存在的技术亮点/难点，3-5条"],\n  "deepDive": [{"q": "值得当面深挖的问题", "why": "为什么问（对应哪个文件/设计）", "expected": "真做过的人应该能答出的要点"}],\n  "traps": ["如果候选人没真做过，容易露馅的追问点，3-5条"]\n}\ndeepDive 给 6-8 个问题，按含金量排序。要引用具体文件名/模块名，让问题有真实感。仓库代码：\n' + repoText;
+  }
+  return '你是面试官的助手。下面是候选人 GitHub 仓库的真实代码，请写一份"面谈前速记"，只输出 JSON（不要代码块以外的内容）：\n{\n  "projectSummary": "这个仓库解决什么业务问题、业务定位、技术栈，说人话，120字内",\n  "highlights": ["3-4 条值得当面聊的技术点（业务/架构层面）"],\n  "topics": [{"t": "值得验证的话题", "why": "为什么值得问（业务或风险角度）", "expect": "真做过的人能说出哪些具体内容"}],\n  "traps": ["容易注水的说法，3 条以内"]\n}\ntopics 给 3-5 个，全部用业务和架构语言，禁止出现任何文件名、函数名、行号。仓库代码：\n' + repoText;
 }
 async function buildDossier(session, repoText) {
-  const ask = (text) => llmComplete([{ role: 'user', content: dossierPrompt(text) }], { maxTokens: 8000, temperature: 0.3 });
-  const full = await ask(repoText.slice(0, 80000));
+  const codeMode = session.style === 'code';
+  const first = codeMode ? repoText.slice(0, 80000) : repoText.slice(0, 40000);
+  const second = codeMode ? repoText.slice(0, 40000) : repoText.slice(0, 20000);
+  const ask = (text) => llmComplete([{ role: 'user', content: dossierPrompt(text, codeMode) }], { maxTokens: 8000, temperature: 0.3 });
+  const full = await ask(first);
   if (String(full || '').trim()) return full;
-  console.log('[dossier] 空返回，降到 60k 字符重试');
-  return ask(repoText.slice(0, 40000));
+  console.log("[dossier] 空返回，降量重试");
+  return ask(second);
 }
 
 function extractJson(text) {
@@ -250,78 +257,54 @@ function extractJson(text) {
 
 // ---------------- 面试官 prompt ----------------
 function buildSystemPrompt(session) {
-  const modeDesc = session.mode === 'comprehensive'
-    ? '流程：开场请对方自我介绍 → 项目深挖（重点，占一半以上时间）→ 技术基础 → 场景题 → 反问环节 → 礼貌收尾。'
-    : '流程：开场请对方自我介绍 → 围绕 GitHub 项目逐层深挖（这是本次面试的全部重心）→ 反问环节 → 礼貌收尾。';
-  let p = `你是一位资深${session.position}岗位的技术面试官，正在对候选人进行一对一线上实时语音面试。你说话自然、直接、干练，像真人面试官：一次只问一个问题，问题口语化（一般不超过 40 字），不啰嗦，不说客套废话。
-${modeDesc}
-追问纪律（重要）：
-- 候选人回答含糊、只堆名词没有细节、或明显在背书时，立刻追问："你刚才说 X，具体是怎么实现的？" / "为什么选 A 不选 B？" / "这里出过什么问题？"
-- 同一个话题最多追问 3 层，对方连续两次答不上来就自然换话题，不要纠缠。
-- 候选人答得很好就给一句简短肯定（"嗯，这块挺清楚"），然后往更深处或下一块走。
-- 简历和项目档案是你的弹药库：深挖时基于档案里的真实事实提问（可以点名具体文件/模块/设计决策），测试对方是否真懂。
-- 全程记住你说过什么，不要重复问同一个问题。
-输出纪律（重要）：你的回复会被 TTS 直接朗读成语音——禁止任何 markdown 符号、列表、emoji、括号标注；单次回复一般 1~3 句话，不超过 80 字。`;
+  const style = session.style === 'code' ? 'code' : 'real';
+  const head = style === 'code'
+    ? '你是一位资深' + session.position + '岗位的技术面试官，正在对候选人进行一对一线上实时语音面试。你说话自然、直接、干练，像真人面试官：一次只问一个问题，问题口语化（一般不超过 40 字），不啰嗦，不说客套废话。'
+    : '你是一位资深' + session.position + '岗位的面试官，正在进行一对一技术面试。你手里只有候选人的简历和一个项目的简要介绍——你没看过他的代码，也不需要假装看过。你的判断方式：靠追问逻辑和常识，不靠代码细节。';
+  const modeDesc = style === 'code'
+    ? (session.mode === 'comprehensive'
+      ? '流程：开场请对方自我介绍 → 项目深挖（重点，占一半以上时间）→ 技术基础 → 场景题 → 反问环节 → 礼貌收尾。'
+      : '流程：开场请对方自我介绍 → 围绕 GitHub 项目逐层深挖（这是本次面试的全部重心）→ 反问环节 → 礼貌收尾。')
+    : (session.mode === 'comprehensive'
+      ? '流程：开场一两句招呼，请对方介绍自己和最有代表性的项目 → 项目业务与角色 → 选型取舍 → 规模与线上故障 → 技术基础 → 场景题 → 反问 → 礼貌收尾。'
+      : '流程：开场一两句招呼，请对方介绍自己和最有代表性的项目 → 项目业务与角色 → 选型取舍 → 规模与线上故障 → 顺着技术点往下问一层原理 → 反问 → 礼貌收尾。');
+  const discipline = style === 'code'
+    ? ['追问纪律（重要）：',
+       '- 候选人回答含糊、只堆名词没有细节、或明显在背书时，立刻追问："你刚才说 X，具体是怎么实现的？" / "为什么选 A 不选 B？" / "这里出过什么问题？"',
+       '- 同一个话题最多追问 3 层，对方连续两次答不上来就自然换话题，不要纠缠。',
+       '- 候选人答得很好就给一句简短肯定（"嗯，这块挺清楚"），然后往更深处或下一块走。',
+       '- 简历和项目档案是你的弹药库：深挖时基于档案里的真实事实提问（可以点名具体文件/模块/设计决策），测试对方是否真懂。',
+       '- 全程记住你说过什么，不要重复问同一个问题。'].join('\n')
+    : ['追问纪律：',
+       '- 说得含糊（只有名词没有细节、只有结果没有过程）就追一层："具体怎么做的" / "当时为什么这么定" / "出过什么问题"。',
+       '- 同一话题最多追 3 层，对方连续两次答不上来就自然换话题，不要纠缠。',
+       '- 答得好简短肯定一句（"嗯，这块挺清楚"），再往深处或下一块走。',
+       '- 全程记住你说过什么，不要重复问同一个问题。',
+       '',
+       '边界（重要）：',
+       '- 不提文件名、函数名、行号，不说"我看到你代码里……"，你确实没看过。',
+       '- 简历和简介里没有的具体数字和细节不要替对方编，用开放问法让他自己说。',
+       '- 不背八股：问了也要贴着项目场景问。'].join('\n');
+  const output = '输出纪律（重要）：你的回复会被直接朗读成语音——禁止任何 markdown 符号、列表、emoji、括号标注；单次回复一般 1~3 句话，不超过 80 字。';
+  let p = [head, modeDesc, discipline, output].join('\n\n');
 
-  if (session.resumeText) p += `\n\n【候选人简历】\n${session.resumeText.slice(0, 8000)}`;
-  if (session.jd) p += `\n\n【岗位 JD】\n${session.jd}`;
+  if (session.resumeText) p += '\n\n【候选人简历】\n' + session.resumeText.slice(0, 8000);
+  if (session.jd) p += '\n\n【岗位 JD】\n' + session.jd;
   if (session.dossier) {
     const d = session.dossier;
-    p += `\n\n【GitHub 项目档案（来自对其仓库真实代码的分析，深挖弹药）】
-项目：${d.projectSummary || ''}
-亮点：${JSON.stringify(d.highlights || [])}
-深挖问题（按序使用，用完即止）：${JSON.stringify(d.deepDive || [])}
-露馅点：${JSON.stringify(d.traps || [])}`;
+    if (style === 'code') {
+      p += '\n\n【GitHub 项目档案（来自对其仓库真实代码的分析，深挖弹药）】\n项目：' + (d.projectSummary || '') +
+        '\n亮点：' + JSON.stringify(d.highlights || []) +
+        '\n深挖问题（按序使用，用完即止）：' + JSON.stringify(d.deepDive || []) +
+        '\n露馅点：' + JSON.stringify(d.traps || []);
+    } else {
+      p += '\n\n【项目速记（你事先做的功课，只用于判断对方说的是真是假，绝对不要念给候选人听）】\n项目：' + (d.projectSummary || '') +
+        '\n值得聊的技术点：' + JSON.stringify(d.highlights || []) +
+        '\n值得验证的话题：' + JSON.stringify(d.topics || []) +
+        '\n容易注水的说法：' + JSON.stringify(d.traps || []);
+    }
   }
   return p;
-}
-
-function pickRelevantCode(repoText, question, maxChars) {
-  maxChars = maxChars || 60000;
-  const chunks = String(repoText || '').split(/(?=### 文件: )/).filter((x) => x.trim());
-  if (!chunks.length) return String(repoText || '').slice(0, maxChars);
-  const terms = new Set();
-  const q = String(question || '').toLowerCase();
-  (q.match(/[a-z_][a-z0-9_.\/-]{2,}/g) || []).forEach((w) => terms.add(w));
-  (q.match(/[\u4e00-\u9fa5]{2,}/g) || []).forEach((seg) => { for (let i = 0; i + 2 <= seg.length; i++) terms.add(seg.slice(i, i + 2)); });
-  const scored = chunks.map((c) => {
-    const low = c.toLowerCase();
-    let score = 0;
-    terms.forEach((t) => { if (low.includes(t)) score += 3; });
-    return { c, score };
-  });
-  const index = chunks.map((c) => (c.match(/^### 文件: (.+)/) || [])[1]).filter(Boolean).join('\n');
-  const head = '【仓库文件清单】\n' + index + '\n\n【与问题最相关的代码片段】\n';
-  const ordered = scored.slice().sort((a, b) => b.score - a.score);
-  const picked = [];
-  let total = head.length;
-  for (const it of ordered) {
-    if (it.score <= 0 && picked.length) continue;
-    if (total + it.c.length > maxChars) continue;
-    picked.push(it.c); total += it.c.length;
-  }
-  for (const it of ordered) {
-    if (picked.includes(it.c)) continue;
-    if (total + it.c.length > maxChars) break;
-    picked.push(it.c); total += it.c.length;
-  }
-  return head + picked.join('\n\n');
-}
-
-// ---------------- 面试后答疑（技术导师） ----------------
-function tutorPrompt(session, question) {
-  const parts = ['你是一位资深技术导师，正在帮候选人复盘刚结束的这场模拟面试。要求：结合下面提供的真实资料回答，优先引用仓库里真实存在的文件、函数、设计；资料里没有的内容要明确说"仓库里没有这部分"，绝不编造。回答具体、可操作，可以用 markdown（小标题、列表、代码块），不要客套话，不要重复问题。'];
-  parts.push('候选人目标岗位：' + (session.position || '未填写'));
-  if (session.jd) parts.push('【岗位 JD】\n' + session.jd);
-  if (session.repoText) parts.push('【仓库代码（按问题筛出的相关片段）】\n' + pickRelevantCode(session.repoText, question, 60000));
-  else if (session.resumeText) parts.push('【简历】\n' + session.resumeText.slice(0, 8000));
-  if (session.dossier) {
-    const d = session.dossier;
-    parts.push('【项目档案】\n' + JSON.stringify({ summary: d.projectSummary, highlights: d.highlights, deepDive: d.deepDive, traps: d.traps }).slice(0, 6000));
-  }
-  const tr = (session.transcript || []).slice(-24).map((t) => (t.role === 'ai' ? '面试官：' : '候选人：') + t.text).join('\n');
-  if (tr) parts.push('【刚才的面试记录（节选）】\n' + tr);
-  return parts.join('\n\n');
 }
 
 // ---------------- Gemini Live 实时引擎（端到端语音，sub-second） ----------------
@@ -668,6 +651,7 @@ const server = http.createServer(async (req, res) => {
       sid: s.sid,
       position: s.position,
       mode: s.mode,
+      style: s.style,
       resumeChars: (s.resumeText || '').length,
       githubRepo: s.githubUrl ? (parseRepoUrl(s.githubUrl) || '').replace('https://github.com/', '').replace(/\.git$/, '') : '',
       dossier: s.dossier,

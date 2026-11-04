@@ -47,12 +47,12 @@
   #drop .t b{display:block;font-size:14px}
   #drop .t span{font-size:12px;color:var(--dim)}
   #drop .ok{margin-left:auto;color:var(--ok);font-weight:600;font-size:13px}
-  .modes{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-  .mode{border:1.5px solid var(--line2);border-radius:12px;padding:14px 16px;cursor:pointer;transition:.15s;background:#fbfbfe}
-  .mode:hover{border-color:var(--acc2)}
-  .mode.sel{border-color:var(--acc);background:var(--accSoft)}
-  .mode b{display:block;font-size:14px;margin-bottom:3px}
-  .mode span{font-size:12px;color:var(--dim);line-height:1.5}
+  .modes,.styles{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .mode,.style{border:1.5px solid var(--line2);border-radius:12px;padding:14px 16px;cursor:pointer;transition:.15s;background:#fbfbfe}
+  .mode:hover,.style:hover{border-color:var(--acc2)}
+  .mode.sel,.style.sel{border-color:var(--acc);background:var(--accSoft)}
+  .mode b,.style b{display:block;font-size:14px;margin-bottom:3px}
+  .mode span,.style span{font-size:12px;color:var(--dim);line-height:1.5}
   .startRow{display:flex;align-items:center;gap:14px;margin-top:24px}
   .startRow .hint{font-size:12px;color:var(--dim)}
   #prepSteps{margin-top:22px;display:none}
@@ -238,7 +238,7 @@
     .card{padding:18px}
     h1{font-size:22px}
     .sub{margin-bottom:18px}
-    .modes{grid-template-columns:1fr}
+    .modes,.styles{grid-template-columns:1fr}
     .startRow{flex-direction:column;align-items:stretch;gap:10px}
     .startRow .hint{text-align:center}
     .topbar{gap:6px;padding:6px 10px}
@@ -270,7 +270,7 @@
     <div class="brand"><div class="logo">🎙️</div><b>AI 模拟面试</b><span>resume × GitHub deep-dive</span></div>
     <div class="card">
       <h1>开始一场模拟面试</h1>
-      <div class="sub">AI 面试官会<b>真的克隆并通读你的 GitHub 仓库</b>，然后像真人一样语音逐层追问——含糊必追，答不上来才放过。<b>建议戴耳机</b>。</div>
+      <div class="sub">AI 面试官会<b>先做功课</b>（读简历 + 你的 GitHub 仓库），然后像真人一样语音追问——含糊必追，答不上来才放过。<b>真实面试</b>只聊业务与取舍，<b>代码深挖</b>会追到实现细节。<b>建议戴耳机</b>。</div>
 
       <label>简历 <span class="opt">（PDF / TXT / MD，可选但强烈建议）</span></label>
       <div id="drop">
@@ -280,7 +280,7 @@
       </div>
       <input type="file" id="resumeFile" accept=".pdf,.txt,.md" class="hidden">
 
-      <label>GitHub 仓库 <span class="opt">（项目深挖的核心弹药）</span></label>
+      <label>GitHub 仓库 <span class="opt">（可选，填了面试官会先读你的代码）</span></label>
       <input type="text" id="ghUrl" placeholder="owner/repo 或完整链接，如 https://github.com/you/your-repo">
 
       <label>目标岗位</label>
@@ -292,12 +292,18 @@
         <div class="mode" data-mode="comprehensive"><b>🧭 综合技术面</b><span>项目深挖 + 技术基础 + 场景题 + 反问</span></div>
       </div>
 
+      <label>面试风格 <span class="opt">（真实面试更像真人，不会抠代码细节）</span></label>
+      <div class="styles">
+        <div class="style sel" data-style="real"><b>🧑‍💼 真实面试</b><span>只问业务、选型、规模、原理——面试官没看过你代码</span></div>
+        <div class="style" data-style="code"><b>🔬 代码深挖</b><span>点名文件逐层追问实现细节，压强更高</span></div>
+      </div>
+
       <label>岗位 JD <span class="opt">（可选，贴招聘描述）</span></label>
       <textarea id="jd" placeholder="岗位职责 / 任职要求…"></textarea>
 
       <div class="startRow">
         <button class="primary" id="startBtn">准备面试</button>
-        <span class="hint">克隆仓库 + 通读代码 + 生成深挖弹药，约 20~60 秒</span>
+        <span class="hint">读仓库 + 做功课 + 准备开场，约 15~60 秒</span>
       </div>
 
       <div id="prepSteps">
@@ -468,12 +474,17 @@ document.querySelectorAll('.mode').forEach(m => m.onclick = () => {
   m.classList.add('sel');
 });
 function selectedMode() { return document.querySelector('.mode.sel').dataset.mode; }
+document.querySelectorAll('.style').forEach(m => m.onclick = () => {
+  document.querySelectorAll('.style').forEach(x => x.classList.remove('sel'));
+  m.classList.add('sel');
+});
+function selectedStyle() { const el = document.querySelector('.style.sel'); return el ? el.dataset.style : 'real'; }
 
 $('startBtn').onclick = async () => {
   const btn = $('startBtn'), err = $('prepErr');
   btn.disabled = true; err.textContent = '';
   try {
-    const payload = { position: $('position').value.trim(), jd: $('jd').value.trim(), mode: selectedMode(), githubUrl: $('ghUrl').value.trim() };
+    const payload = { position: $('position').value.trim(), jd: $('jd').value.trim(), mode: selectedMode(), style: selectedStyle(), githubUrl: $('ghUrl').value.trim() };
     const f = $('resumeFile').files[0];
     if (f) { payload.resumeBase64 = await fileToB64(f); payload.resumeName = f.name; }
     if (!payload.resumeBase64 && !payload.githubUrl) throw new Error('至少上传简历或填写 GitHub 仓库');
@@ -508,7 +519,8 @@ function fileToB64(f) {
 async function enterRoom() {
   show('view-room');
   $('topPos').textContent = sessionInfo?.position || $('position').value || '模拟面试';
-  $('topMode').textContent = (sessionInfo?.mode || selectedMode()) === 'project' ? '项目深挖' : '综合技术面';
+  const st = sessionInfo?.style || selectedStyle();
+  $('topMode').textContent = ((sessionInfo?.mode || selectedMode()) === 'project' ? '项目深挖' : '综合技术面') + (st === 'code' ? ' · 代码深挖' : ' · 真实面试');
   t0 = Date.now();
   timerInt = setInterval(() => {
     const s = Math.floor((Date.now() - t0) / 1000);
@@ -752,6 +764,7 @@ async function loadSessionInfo() {
   if (sessionInfo.resumeChars) badges.push('简历 ' + sessionInfo.resumeChars + ' 字');
   if (sessionInfo.githubRepo) badges.push('⚡ ' + sessionInfo.githubRepo, '代码已通读');
   badges.push(sessionInfo.mode === 'project' ? '项目深挖专场' : '综合技术面');
+  badges.push(sessionInfo.style === 'code' ? '代码深挖' : '真实面试');
   $('profBadges').innerHTML = badges.map((b, i) => `<div class="badge${i > 0 ? ' acc' : ''}">${b}</div>`).join('');
   if (d) {
     $('secSummary').style.display = ''; $('profSummary').textContent = d.projectSummary || '';
